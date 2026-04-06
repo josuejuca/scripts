@@ -6,4 +6,4 @@ $obj.ChangeMode(2)
 
 v2:
 
-powershell -Command "$obj = gwmi -namespace 'Root/CIMV2/TerminalServices' Win32_TerminalServiceSetting; $obj.SetSpecifiedLicenseServerList('NOME_DO_SERVIDOR'); $obj.ChangeMode(2); gpupdate /force; net stop TermService /y; net start TermService"
+powershell -ExecutionPolicy Bypass -NoProfile -Command "& { $obj = Get-WmiObject -Namespace 'Root/CIMV2/TerminalServices' -Class Win32_TerminalServiceSetting; $obj.SetSpecifiedLicenseServerList('WIN-2TLSU8NBCUN'); $obj.ChangeMode(2); gpupdate /force; net stop TermService /y; net start TermService }"
