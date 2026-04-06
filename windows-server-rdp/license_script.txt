@@ -1,0 +1,3 @@
+$obj = gwmi -namespace "Root/CIMV2/TerminalServices" Win32_TerminalServiceSetting
+$obj.SetSpecifiedLicenseServerList("NOME_DO_SERVIDOR")
+$obj.ChangeMode(2)
