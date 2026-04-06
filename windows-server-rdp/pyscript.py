@@ -1,3 +1,4 @@
+# python pyscript.py --install --reg-path "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\GracePeriod"
 import argparse
 import ctypes
 import datetime as dt
