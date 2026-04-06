@@ -7,3 +7,7 @@ Reiniciar o RDP
 
 net stop TermService /y
 net start TermService
+
+versão ps:
+
+powershell -Command "Restart-Service -Name TermService -Force"
