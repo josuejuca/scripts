@@ -102,10 +102,35 @@ def registry_exists(reg_path: str):
     res = run_cmd(["reg", "query", reg_path])
     return res.returncode == 0
 
-
 def delete_registry(reg_path: str):
-    res = run_cmd(["reg", "delete", reg_path, "/f"])
-    return res.returncode, (res.stdout or "").strip(), (res.stderr or "").strip()
+    ps_path = reg_path.replace("HKLM\\", "Registry::HKEY_LOCAL_MACHINE\\")
+    
+    ps_script = f'''
+$ErrorActionPreference = "Stop"
+$path = "{ps_path}"
+
+if (Test-Path $path) {{
+    takeown /f "$path" /a /r /d y | Out-Null
+    icacls "$path" /grant Administrators:F /t /c | Out-Null
+    Remove-Item -LiteralPath $path -Recurse -Force
+    Write-Output "REMOVIDO"
+}} else {{
+    Write-Output "NAO_EXISTE"
+}}
+'''
+
+    res = run_cmd([
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-Command", ps_script
+    ])
+
+    ok = res.returncode == 0
+    out = (res.stdout or "").strip()
+    err = (res.stderr or "").strip()
+
+    return (0 if ok else 1), out, err
 
 
 def restart_termservice():
