@@ -13,21 +13,28 @@ LOG_FILE = BASE_DIR / "log.txt"
 STATE_FILE = BASE_DIR / "state.json"
 CONFIG_FILE = BASE_DIR / "config.json"
 SCRIPT_NAME = "pyscript.py"
+
 TASK_BOOT_NAME = "JUCA_RegCleanup_SYSTEM"
 TASK_DAILY_NAME = "JUCA_RegCleanup_SYSTEM_DAILY"
+
 DEFAULT_REG_PATH = r"HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\GracePeriod"
 
 
-def ensure_base_dir() -> None:
+# -----------------------------
+# Utils
+# -----------------------------
+
+def ensure_base_dir():
     BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def now_str() -> str:
+def now_str():
     return dt.datetime.now().strftime("%d/%m/%Y %H:%M")
 
 
-def log_block(start_msg: str | None = None, end_msg: str | None = None, status: str | None = None) -> None:
+def log_block(start_msg=None, end_msg=None, status=None):
     ensure_base_dir()
+
     lines = ["----------"]
 
     if start_msg:
@@ -45,203 +52,213 @@ def log_block(start_msg: str | None = None, end_msg: str | None = None, status: 
         f.write("\n".join(lines) + "\n")
 
 
-def is_admin() -> bool:
+def is_admin():
     try:
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
         return False
 
 
-def run_cmd(cmd: list[str], use_shell: bool = False) -> subprocess.CompletedProcess:
+def run_cmd(cmd: list[str]):
     return subprocess.run(
-        cmd if not use_shell else " ".join(cmd),
+        cmd,
         capture_output=True,
         text=True,
-        shell=use_shell,
         encoding="utf-8",
-        errors="replace",
+        errors="replace"
     )
 
 
-def save_json(path: Path, data: dict) -> None:
-    ensure_base_dir()
-    with path.open("w", encoding="utf-8") as f:
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def load_json(path: Path, default: dict | None = None) -> dict:
+def load_json(path, default=None):
     if not path.exists():
         return default or {}
-    with path.open("r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_config(reg_path: str) -> None:
+# -----------------------------
+# Config
+# -----------------------------
+
+def save_config(reg_path):
     save_json(CONFIG_FILE, {"registry_path": reg_path})
 
 
-def load_config() -> str:
-    cfg = load_json(CONFIG_FILE, default={})
+def load_config():
+    cfg = load_json(CONFIG_FILE, {})
     return cfg.get("registry_path", DEFAULT_REG_PATH)
 
 
-def registry_exists(reg_path: str) -> bool:
-    result = run_cmd(["reg", "query", reg_path])
-    return result.returncode == 0
+# -----------------------------
+# Registry
+# -----------------------------
+
+def registry_exists(reg_path):
+    return run_cmd(["reg", "query", reg_path]).returncode == 0
 
 
-def delete_registry_key(reg_path: str) -> tuple[int, str, str]:
-    result = run_cmd(["reg", "delete", reg_path, "/f"])
-    return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
+def delete_registry(reg_path):
+    res = run_cmd(["reg", "delete", reg_path, "/f"])
+    return res.returncode, res.stdout.strip(), res.stderr.strip()
 
 
-def should_run_every_7_days() -> bool:
-    state = load_json(STATE_FILE, default={})
-    last_success = state.get("last_success")
+# -----------------------------
+# State
+# -----------------------------
 
-    if not last_success:
+def should_run():
+    state = load_json(STATE_FILE, {})
+    last = state.get("last_success")
+
+    if not last:
         return True
 
     try:
-        last_dt = dt.datetime.fromisoformat(last_success)
-    except Exception:
+        last_dt = dt.datetime.fromisoformat(last)
+    except:
         return True
 
-    return (dt.datetime.now() - last_dt) >= dt.timedelta(days=7)
+    return (dt.datetime.now() - last_dt).days >= 7
 
 
-def update_state(success: bool, details: str = "") -> None:
-    state = load_json(STATE_FILE, default={})
+def update_state(success, detail=""):
+    state = load_json(STATE_FILE, {})
     state["last_attempt"] = dt.datetime.now().isoformat()
-    state["details"] = details
 
     if success:
         state["last_success"] = dt.datetime.now().isoformat()
 
+    state["detail"] = detail
+
     save_json(STATE_FILE, state)
 
 
-def create_scheduled_tasks() -> None:
-    python_exe = sys.executable
-    deployed_script = BASE_DIR / SCRIPT_NAME
-    task_command = f'"{python_exe}" "{deployed_script}" --run'
+# -----------------------------
+# Scheduler
+# -----------------------------
 
-    boot_cmd = [
+def create_tasks():
+    python_exe = sys.executable
+    script = BASE_DIR / SCRIPT_NAME
+
+    command = f'"{python_exe}" "{script}" --run'
+
+    boot = [
         "schtasks",
         "/Create",
         "/TN", TASK_BOOT_NAME,
-        "/TR", task_command,
+        "/TR", command,
         "/SC", "ONSTART",
         "/RU", "SYSTEM",
         "/RL", "HIGHEST",
-        "/F",
+        "/F"
     ]
-    boot_res = run_cmd(boot_cmd, use_shell=True)
-    if boot_res.returncode != 0:
-        raise RuntimeError(boot_res.stderr or boot_res.stdout or "Falha ao criar tarefa ONSTART")
 
-    daily_cmd = [
+    daily = [
         "schtasks",
         "/Create",
         "/TN", TASK_DAILY_NAME,
-        "/TR", task_command,
+        "/TR", command,
         "/SC", "DAILY",
         "/ST", "03:00",
         "/RU", "SYSTEM",
         "/RL", "HIGHEST",
-        "/F",
+        "/F"
     ]
-    daily_res = run_cmd(daily_cmd, use_shell=True)
-    if daily_res.returncode != 0:
-        raise RuntimeError(daily_res.stderr or daily_res.stdout or "Falha ao criar tarefa DAILY")
+
+    r1 = run_cmd(boot)
+    if r1.returncode != 0:
+        raise RuntimeError(r1.stderr or r1.stdout)
+
+    r2 = run_cmd(daily)
+    if r2.returncode != 0:
+        raise RuntimeError(r2.stderr or r2.stdout)
 
 
-def delete_scheduled_tasks() -> None:
-    for task_name in (TASK_BOOT_NAME, TASK_DAILY_NAME):
-        run_cmd(["schtasks", "/Delete", "/TN", task_name, "/F"])
+def delete_tasks():
+    for t in [TASK_BOOT_NAME, TASK_DAILY_NAME]:
+        run_cmd(["schtasks", "/Delete", "/TN", t, "/F"])
 
 
-def install(reg_path: str) -> None:
+# -----------------------------
+# Core
+# -----------------------------
+
+def install(reg_path):
     if not is_admin():
-        print("Erro: execute este script como Administrador para instalar.")
+        print("Execute como ADMIN.")
         sys.exit(1)
 
     ensure_base_dir()
 
-    src_script = Path(__file__).resolve()
-    dst_script = BASE_DIR / SCRIPT_NAME
+    src = Path(__file__).resolve()
+    dst = BASE_DIR / SCRIPT_NAME
 
-    if src_script != dst_script:
-        shutil.copy2(src_script, dst_script)
+    if src != dst:
+        shutil.copy2(src, dst)
 
     save_config(reg_path)
-    create_scheduled_tasks()
+    create_tasks()
 
-    print("Instalação concluída com sucesso.")
-    print(f"Pasta base: {BASE_DIR}")
-    print(f"Chave configurada: {reg_path}")
-    print(f"Tarefas criadas: {TASK_BOOT_NAME} e {TASK_DAILY_NAME}")
+    print("OK instalado")
 
 
-def run_cleanup() -> None:
+def run_cleanup():
     ensure_base_dir()
-    reg_path = load_config()
 
-    if not should_run_every_7_days():
+    if not should_run():
         return
 
-    log_block(start_msg="Iniciando a remoção do registro")
+    reg_path = load_config()
+
+    log_block(start_msg="Iniciando remoção")
 
     try:
         if not registry_exists(reg_path):
-            update_state(True, "Chave já não existia")
-            log_block(
-                end_msg="Finalização da remoção do registro",
-                status="SUCESSO - CHAVE JÁ NÃO EXISTIA",
-            )
+            update_state(True, "não existia")
+            log_block(end_msg="Finalizado", status="OK - NÃO EXISTIA")
             return
 
-        code, stdout, stderr = delete_registry_key(reg_path)
+        code, out, err = delete_registry(reg_path)
 
         if code == 0:
-            update_state(True, stdout or "Removido com sucesso")
-            log_block(
-                end_msg="Finalização da remoção do registro",
-                status="SUCESSO",
-            )
+            update_state(True, "removido")
+            log_block(end_msg="Finalizado", status="SUCESSO")
         else:
-            detail = stderr or stdout or "Erro desconhecido"
+            detail = err or out
             update_state(False, detail)
-            log_block(
-                end_msg="Finalização da remoção do registro",
-                status=f"ERRO - {detail}",
-            )
+            log_block(end_msg="Finalizado", status=f"ERRO - {detail}")
 
-    except Exception as exc:
-        update_state(False, str(exc))
-        log_block(
-            end_msg="Finalização da remoção do registro",
-            status=f"ERRO - {exc}",
-        )
+    except Exception as e:
+        update_state(False, str(e))
+        log_block(end_msg="Finalizado", status=f"ERRO - {e}")
 
 
-def uninstall() -> None:
+def uninstall():
     if not is_admin():
-        print("Erro: execute este script como Administrador para desinstalar.")
+        print("Execute como ADMIN.")
         sys.exit(1)
 
-    delete_scheduled_tasks()
-    print("Tarefas removidas com sucesso.")
+    delete_tasks()
+    print("Tasks removidas")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Remove uma chave do Registro do Windows como SYSTEM usando Tarefa Agendada."
-    )
-    parser.add_argument("--install", action="store_true", help="Instala o script e cria as tarefas agendadas")
-    parser.add_argument("--run", action="store_true", help="Executa a rotina de limpeza")
-    parser.add_argument("--uninstall", action="store_true", help="Remove as tarefas agendadas")
-    parser.add_argument("--reg-path", type=str, help="Caminho completo da chave do registro")
+# -----------------------------
+# CLI
+# -----------------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--install", action="store_true")
+    parser.add_argument("--run", action="store_true")
+    parser.add_argument("--uninstall", action="store_true")
+    parser.add_argument("--reg-path", type=str)
 
     args = parser.parse_args()
     reg_path = args.reg_path or DEFAULT_REG_PATH
