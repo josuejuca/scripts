@@ -1,4 +1,7 @@
+# python pyscript.py --uninstall
 # python pyscript.py --install --reg-path "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\GracePeriod"
+# python pyscript.py --run-now-system
+
 import argparse
 import ctypes
 import datetime as dt
@@ -24,8 +27,12 @@ def ensure_base_dir():
     BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def now():
+    return dt.datetime.now()
+
+
 def now_str():
-    return dt.datetime.now().strftime("%d/%m/%Y %H:%M")
+    return now().strftime("%d/%m/%Y %H:%M")
 
 
 def log_block(start_msg=None, end_msg=None, status=None):
@@ -54,7 +61,7 @@ def is_admin():
         return False
 
 
-def run_cmd(cmd: list[str]):
+def run_cmd(cmd):
     return subprocess.run(
         cmd,
         capture_output=True,
@@ -86,8 +93,14 @@ def load_config():
     return cfg.get("registry_path", DEFAULT_REG_PATH)
 
 
+def whoami():
+    res = run_cmd(["whoami"])
+    return (res.stdout or res.stderr or "").strip()
+
+
 def registry_exists(reg_path: str):
-    return run_cmd(["reg", "query", reg_path]).returncode == 0
+    res = run_cmd(["reg", "query", reg_path])
+    return res.returncode == 0
 
 
 def delete_registry(reg_path: str):
@@ -101,8 +114,8 @@ def restart_termservice():
 
     ok = stop_res.returncode == 0 and start_res.returncode == 0
     detail = (
-        f"STOP[{stop_res.returncode}]: {(stop_res.stdout or stop_res.stderr or '').strip()} | "
-        f"START[{start_res.returncode}]: {(start_res.stdout or start_res.stderr or '').strip()}"
+        f"STOP[{stop_res.returncode}]: {((stop_res.stdout or stop_res.stderr or '').strip())} | "
+        f"START[{start_res.returncode}]: {((start_res.stdout or start_res.stderr or '').strip())}"
     )
     return ok, detail
 
@@ -119,18 +132,86 @@ def should_run():
     except Exception:
         return True, False
 
-    return (dt.datetime.now() - last_dt).days >= 7, False
+    delta = now() - last_dt
+    return delta.days >= 7, False
 
 
 def update_state(success: bool, detail: str = ""):
     state = load_json(STATE_FILE, {})
-    state["last_attempt"] = dt.datetime.now().isoformat()
+    state["last_attempt"] = now().isoformat()
+    state["detail"] = detail
 
     if success:
-        state["last_success"] = dt.datetime.now().isoformat()
+        state["last_success"] = now().isoformat()
 
-    state["detail"] = detail
     save_json(STATE_FILE, state)
+
+
+def to_registry_provider_path(reg_path: str) -> str:
+    reg_path = reg_path.strip()
+    if reg_path.upper().startswith("HKLM\\"):
+        return "Registry::HKEY_LOCAL_MACHINE\\" + reg_path[5:]
+    if reg_path.upper().startswith("HKEY_LOCAL_MACHINE\\"):
+        return "Registry::" + reg_path
+    if reg_path.upper().startswith("HKCU\\"):
+        return "Registry::HKEY_CURRENT_USER\\" + reg_path[5:]
+    if reg_path.upper().startswith("HKEY_CURRENT_USER\\"):
+        return "Registry::" + reg_path
+    return reg_path
+
+
+def try_fix_registry_permissions(reg_path: str):
+    ps_path = to_registry_provider_path(reg_path)
+
+    ps_script = rf'''
+$ErrorActionPreference = "Stop"
+$path = "{ps_path}"
+if (-not (Test-Path $path)) {{
+    Write-Output "PATH_NOT_FOUND"
+    exit 0
+}}
+
+$key = Get-Item -LiteralPath $path
+$acl = $key.GetAccessControl()
+
+$admins = New-Object System.Security.Principal.NTAccount("Administrators")
+$system = New-Object System.Security.Principal.NTAccount("SYSTEM")
+
+$acl.SetOwner($admins)
+
+$ruleAdmins = New-Object System.Security.AccessControl.RegistryAccessRule(
+    "Administrators",
+    "FullControl",
+    "ContainerInherit,ObjectInherit",
+    "None",
+    "Allow"
+)
+
+$ruleSystem = New-Object System.Security.AccessControl.RegistryAccessRule(
+    "SYSTEM",
+    "FullControl",
+    "ContainerInherit,ObjectInherit",
+    "None",
+    "Allow"
+)
+
+$acl.SetAccessRule($ruleAdmins)
+$acl.SetAccessRule($ruleSystem)
+$key.SetAccessControl($acl)
+
+Write-Output "ACL_FIXED"
+'''
+    res = run_cmd([
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        ps_script
+    ])
+    ok = res.returncode == 0
+    detail = (res.stdout or res.stderr or "").strip()
+    return ok, detail
 
 
 def create_tasks():
@@ -163,11 +244,15 @@ def create_tasks():
 
     r1 = run_cmd(boot)
     if r1.returncode != 0:
-        raise RuntimeError(r1.stderr or r1.stdout or "Erro ao criar task ONSTART")
+        raise RuntimeError(f"Erro task ONSTART: {r1.stderr or r1.stdout}")
 
     r2 = run_cmd(daily)
     if r2.returncode != 0:
-        raise RuntimeError(r2.stderr or r2.stdout or "Erro ao criar task DAILY")
+        raise RuntimeError(f"Erro task DAILY: {r2.stderr or r2.stdout}")
+
+
+def run_system_now():
+    return run_cmd(["schtasks", "/Run", "/TN", TASK_BOOT_NAME])
 
 
 def delete_tasks():
@@ -181,6 +266,7 @@ def install(reg_path: str):
         sys.exit(1)
 
     ensure_base_dir()
+    log_block(start_msg="Instalação da rotina")
 
     src = Path(__file__).resolve()
     dst = BASE_DIR / SCRIPT_NAME
@@ -191,24 +277,37 @@ def install(reg_path: str):
     save_config(reg_path)
     create_tasks()
 
+    log_block(
+        end_msg="Instalação da rotina",
+        status=f"SUCESSO - PYTHON: {sys.executable}"
+    )
+
     print("OK instalado")
     print(f"Pasta: {BASE_DIR}")
     print(f"Registro: {reg_path}")
+    print(f"Python: {sys.executable}")
+    print("Para testar como SYSTEM: schtasks /Run /TN JUCA_RegCleanup_SYSTEM")
 
 
-def run_cleanup():
+def run_cleanup(force: bool = False):
     ensure_base_dir()
 
     should_execute, is_first_run = should_run()
-    if not should_execute:
+    if not should_execute and not force:
+        log_block(
+            start_msg=f"Verificação agendada da remoção do registro // Usuário: {whoami()}",
+            end_msg="Finalização da verificação agendada",
+            status="SKIP - AINDA NÃO PASSARAM 7 DIAS"
+        )
         return
 
     reg_path = load_config()
+    identity = whoami()
 
     if is_first_run:
-        log_block(start_msg="Primeira execução da rotina de remoção do registro")
+        log_block(start_msg=f"Primeira execução da rotina de remoção do registro // Usuário: {identity}")
     else:
-        log_block(start_msg="Iniciando a remoção do registro")
+        log_block(start_msg=f"Iniciando a remoção do registro // Usuário: {identity}")
 
     try:
         if not registry_exists(reg_path):
@@ -222,13 +321,19 @@ def run_cleanup():
         code, out, err = delete_registry(reg_path)
 
         if code != 0:
-            detail = err or out or "Erro ao remover chave"
-            update_state(False, detail)
-            log_block(
-                end_msg="Finalização da remoção do registro",
-                status=f"ERRO - {detail}"
-            )
-            return
+            fix_ok, fix_detail = try_fix_registry_permissions(reg_path)
+            code, out, err = delete_registry(reg_path)
+
+            if code != 0:
+                detail = err or out or "Erro ao remover chave"
+                if fix_detail:
+                    detail = f"{detail} | ACL: {fix_detail}"
+                update_state(False, detail)
+                log_block(
+                    end_msg="Finalização da remoção do registro",
+                    status=f"ERRO - {detail}"
+                )
+                return
 
         svc_ok, svc_detail = restart_termservice()
 
@@ -259,6 +364,11 @@ def uninstall():
         sys.exit(1)
 
     delete_tasks()
+    log_block(
+        start_msg="Desinstalação da rotina",
+        end_msg="Desinstalação da rotina",
+        status="SUCESSO"
+    )
     print("Tasks removidas")
 
 
@@ -266,6 +376,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--install", action="store_true")
     parser.add_argument("--run", action="store_true")
+    parser.add_argument("--run-now-system", action="store_true")
     parser.add_argument("--uninstall", action="store_true")
     parser.add_argument("--reg-path", type=str)
 
@@ -276,14 +387,13 @@ def main():
         install(reg_path)
     elif args.run:
         run_cleanup()
+    elif args.run_now_system:
+        res = run_system_now()
+        print((res.stdout or res.stderr or "").strip())
     elif args.uninstall:
         uninstall()
     else:
         parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
 
 
 if __name__ == "__main__":
